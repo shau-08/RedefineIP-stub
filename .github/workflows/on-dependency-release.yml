@@ -1,0 +1,103 @@
+name: On Dependency Release
+
+# Fired by a dependency repo's reusable-cd.yml (via notify_repo) right after it
+# publishes its own release. Bumps this repo's submodule pointer for that
+# dependency to the released commit, commits it, then regenerates RTL against
+# the new pointer.
+
+on:
+  repository_dispatch:
+    types: [dependency-released]
+
+permissions:
+  contents: write
+
+# Serialize bump-and-push runs: two dependencies releasing close together
+# would otherwise both check out the same branch tip and race to push,
+# with the second push failing non-fast-forward. Queue instead of drop,
+# since every release needs its own bump commit.
+concurrency:
+  group: on-dependency-release
+  cancel-in-progress: false
+
+jobs:
+  bump-submodule:
+    runs-on: ubuntu-latest
+    outputs:
+      new_sha: ${{ steps.bump.outputs.new_sha }}
+      bumped: ${{ steps.bump.outputs.bumped }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Locate submodule path matching the released repo (match by name, not org)
+        id: locate
+        run: |
+          set -euo pipefail
+          released_repo="${{ github.event.client_payload.repo }}"   # e.g. "shau-08/mmu" or "morphingmachines/mmu"
+          released_name="${released_repo##*/}"                      # -> "mmu"
+
+          match=""
+          while IFS= read -r line; do
+            path=$(echo "$line" | sed -n 's/^submodule\.\(.*\)\.path .*/\1/p')
+            url=$(git config -f .gitmodules --get "submodule.$path.url" || true)
+            url_name=$(basename "$url" .git)
+            if [ "$url_name" = "$released_name" ]; then
+              match="$path"
+              break
+            fi
+          done < <(git config -f .gitmodules --get-regexp '\.path$')
+
+          if [ -z "$match" ]; then
+            echo "::error::No submodule in .gitmodules matches released repo '$released_repo' (looked for name '$released_name')"
+            exit 1
+          fi
+          echo "path=$match" >> "$GITHUB_OUTPUT"
+          echo "Matched submodule path: $match"
+
+      - name: Bump submodule to the released commit
+        id: bump
+        env:
+          SUB_PATH: ${{ steps.locate.outputs.path }}
+          RELEASED_SHA: ${{ github.event.client_payload.sha }}
+          RELEASED_TAG: ${{ github.event.client_payload.tag }}
+          RELEASED_REPO: ${{ github.event.client_payload.repo }}
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 -- "$SUB_PATH"
+
+          before_sha=$(git -C "$SUB_PATH" rev-parse HEAD)
+          if [ "$before_sha" = "$RELEASED_SHA" ]; then
+            echo "Submodule $SUB_PATH is already at $RELEASED_SHA -- nothing to bump."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "new_sha=$before_sha" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C "$SUB_PATH" fetch --depth 1 origin "$RELEASED_SHA"
+          git -C "$SUB_PATH" checkout --detach "$RELEASED_SHA"
+
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git add "$SUB_PATH"
+          git commit -m "chore: bump $RELEASED_REPO to $RELEASED_TAG ($before_sha -> ${RELEASED_SHA:0:7})"
+
+          default_branch=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
+          git push origin "HEAD:$default_branch"
+
+          new_sha=$(git rev-parse HEAD)
+          echo "new_sha=$new_sha" >> "$GITHUB_OUTPUT"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+
+  regenerate-rtl:
+    needs: bump-submodule
+    if: needs.bump-submodule.outputs.bumped == 'true'
+    permissions:
+      contents: write
+    uses: shau-08/CICD/.github/workflows/reusable-cd.yml@main
+    with:
+      build_output_path: generated_sv_dir
+      ref: ${{ needs.bump-submodule.outputs.new_sha }}
+    secrets: inherit

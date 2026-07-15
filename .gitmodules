@@ -1,0 +1,3 @@
+[submodule "dependencies/mmu-stub"]
+	path = dependencies/mmu-stub
+	url = git@github.com:shau-08/mmu-stub.git

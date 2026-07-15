@@ -23,10 +23,25 @@ concurrency:
 jobs:
   bump-submodule:
     runs-on: ubuntu-latest
+    env:
+      HAS_SSH_KEY: ${{ secrets.CI_SSH_PRIVATE_KEY != '' }}
     outputs:
       new_sha: ${{ steps.bump.outputs.new_sha }}
       bumped: ${{ steps.bump.outputs.bumped }}
     steps:
+      # This job runs its own raw git commands directly (not through
+      # setup-toolchain), so it needs its own SSH auth -- without this,
+      # every git@github.com: clone/fetch in the steps below fails with
+      # "Permission denied (publickey)", private repo or not (SSH always
+      # requires a key, regardless of visibility). secrets.* can't be
+      # referenced directly in an `if:` -- mapped through env.HAS_SSH_KEY
+      # above instead.
+      - name: Configure SSH access for submodule operations
+        if: env.HAS_SSH_KEY == 'true'
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CI_SSH_PRIVATE_KEY }}
+
       - uses: actions/checkout@v4
         with:
           submodules: false

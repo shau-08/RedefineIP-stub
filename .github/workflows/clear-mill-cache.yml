@@ -1,0 +1,38 @@
+name: Clear Mill Compiled Output Cache
+
+# mill-out-* cache entries are keyed by a hash of build.sc and every Scala
+# source file, so each source change creates a new entry rather than
+# replacing the old one. GitHub only auto-evicts a cache after 7 days of no
+# access, or once the repo's total cache size passes 10 GB (oldest first) --
+# so stale entries can otherwise accumulate indefinitely. This clears every
+# mill-out-* cache on a schedule so the next CI/CD run always rebuilds from a
+# single fresh entry instead of carrying dead weight.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0' # weekly
+
+permissions:
+  actions: write
+
+jobs:
+  clear-mill-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete all mill-out-* caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # --limit 100 covers this repo's realistic cache volume; raise it
+          # (or add pagination) if mill-out-* entries ever regularly exceed that.
+          cache_ids=$(gh cache list --repo "${{ github.repository }}" --key mill-out- --limit 100 --json id -q '.[].id')
+          if [ -z "$cache_ids" ]; then
+            echo "No mill-out-* caches found -- nothing to delete."
+            exit 0
+          fi
+          for id in $cache_ids; do
+            echo "Deleting cache $id"
+            gh cache delete "$id" --repo "${{ github.repository }}"
+          done

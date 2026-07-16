@@ -115,4 +115,5 @@ jobs:
     with:
       build_output_path: generated_sv_dir
       ref: ${{ needs.bump-submodule.outputs.new_sha }}
+      commit_generated_output: true
     secrets: inherit

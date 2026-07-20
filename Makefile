@@ -1,17 +1,34 @@
-# Stub Makefile -- same as mmu-stub, no real toolchain dependency.
+
+project = redefine
+
+TARGET ?= RedefineIP
+
+# Toolchains and tools
+MILL = ./../playground/mill
+
+-include ./../playground/Makefile.include
 -include cd.config
+
 RTL_TARGET ?= rtl
-TARGET ?= stub
 
-.PHONY: rtl lazyrtl rtl-dispatch
+# Targets
+synrtl:## Generates Verilog code from Chisel sources (output to ./generated_sv_dir)
+	$(MILL) $(project).runMain $(project).synthRtlLazyMain $(TARGET)
 
-rtl:
-	@mkdir -p generated_sv_dir
-	@echo "// stub top-level generated RTL, includes bumped submodule at:" > generated_sv_dir/stub.sv
-	@echo "// $$(cat dependencies/mmu-stub/generated_sv_dir/stub.sv 2>/dev/null || echo '(submodule not yet initialized)')" >> generated_sv_dir/stub.sv
-	@echo "stub rtl target -- wrote generated_sv_dir/stub.sv"
+rtl:## Generates Verilog code from Chisel sources (output to ./generated_sv_dir)
+	$(MILL) $(project).runMain $(project).rtlLazyMain $(TARGET)
 
-lazyrtl: rtl
+.PHONY: rtl-dispatch
+rtl-dispatch: ## Used by CD: runs whichever target cd.config's RTL_TARGET names (default: rtl; synrtl is the synthesis-oriented variant)
+	$(MAKE) $(RTL_TARGET) TARGET=$(TARGET)
 
-rtl-dispatch:
-	@$(MAKE) $(RTL_TARGET) TARGET=$(TARGET)
+
+.PHONY: verilate 
+verilate: check-env ## Generate Verilator simulation executable for  TARGET = RV32 (default) or RV64 or RV32RoCC or RV64RoCC 
+	$(MILL) $(project).runMain $(project).TestLazyMain $(TARGET)
+
+.PHONY: check-env
+check-env:
+ifndef RISCV
+	$(error RISCV environment variable is not defined)
+endif	

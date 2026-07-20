@@ -1,6 +1,6 @@
 name: On Dependency Release
 
-# Fired by a dependency repo's reusable-cd.yml (via notify_repo) right after it
+# Fired by a dependency repo's RTL-CD.yml (via notify_repo) right after it
 # publishes its own release. Bumps this repo's submodule pointer for that
 # dependency to the released commit, commits it, then regenerates RTL against
 # the new pointer.
@@ -24,34 +24,42 @@ jobs:
   bump-submodule:
     runs-on: ubuntu-latest
     env:
-      HAS_SSH_KEY: ${{ secrets.CI_SSH_PRIVATE_KEY != '' }}
+      HAS_TOKEN: ${{ secrets.CI_SUBMODULE_PAT != '' }}
     outputs:
       new_sha: ${{ steps.bump.outputs.new_sha }}
       bumped: ${{ steps.bump.outputs.bumped }}
+      target_branch: ${{ steps.bump.outputs.target_branch }}
+      tag_name: ${{ steps.bump.outputs.tag_name }}
     steps:
       # This job runs its own raw git commands directly (not through
-      # setup-toolchain), so it needs its own SSH auth -- without this,
-      # every git@github.com: clone/fetch in the steps below fails with
-      # "Permission denied (publickey)", private repo or not (SSH always
-      # requires a key, regardless of visibility). secrets.* can't be
-      # referenced directly in an `if:` -- mapped through env.HAS_SSH_KEY
-      # above instead.
-      - name: Configure SSH access for submodule operations
-        if: env.HAS_SSH_KEY == 'true'
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.CI_SSH_PRIVATE_KEY }}
+      # setup-toolchain), so it needs its own auth -- without this,
+      # every git@github.com: clone/fetch in the steps below fails,
+      # private repo or not. secrets.* can't be referenced directly in
+      # an `if:` -- mapped through env.HAS_TOKEN above instead.
+      - name: Configure git to use PAT for SSH-style submodule URLs
+        if: env.HAS_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${{ secrets.CI_SUBMODULE_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - uses: actions/checkout@v4
         with:
           submodules: false
           fetch-depth: 0
+          # Prefer the branch the release actually came from. repository_dispatch
+          # itself always runs against the default branch regardless -- but the
+          # payload carries the real branch (set by Reusable-RTL-CD.yml's "Notify
+          # super-repo" step), so we can still explicitly check out and later
+          # push to the right branch rather than the run's own default context.
+          # Falls back to this repo's default branch if an older caller's
+          # payload doesn't include `branch` yet.
+          ref: ${{ github.event.client_payload.branch || '' }}
 
       - name: Locate submodule path matching the released repo (match by name, not org)
         id: locate
         run: |
           set -euo pipefail
-          released_repo="${{ github.event.client_payload.repo }}"   # e.g. "shau-08/mmu" or "morphingmachines/mmu"
+          released_repo="${{ github.event.client_payload.repo }}"   # e.g. "morphingmachines/mmu" -- always the org, never shau-08 (that's only CICD's own home)
           released_name="${released_repo##*/}"                      # -> "mmu"
 
           match=""
@@ -79,8 +87,24 @@ jobs:
           RELEASED_SHA: ${{ github.event.client_payload.sha }}
           RELEASED_TAG: ${{ github.event.client_payload.tag }}
           RELEASED_REPO: ${{ github.event.client_payload.repo }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch }}
         run: |
           set -euo pipefail
+
+          # Resolve which branch to push the bump commit to. Prefer the branch
+          # carried in the dispatch payload (the branch that actually released);
+          # fall back to this repo's own default branch only for older callers
+          # whose payload doesn't include `branch` yet.
+          if [ -n "$PAYLOAD_BRANCH" ]; then
+            target_branch="$PAYLOAD_BRANCH"
+          else
+            target_branch=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
+          fi
+          echo "target_branch=$target_branch" >> "$GITHUB_OUTPUT"
+
+          released_name="${RELEASED_REPO##*/}"
+          echo "tag_name=${released_name}-${target_branch}-${RELEASED_TAG}" >> "$GITHUB_OUTPUT"
+
           git submodule update --init --depth 1 -- "$SUB_PATH"
 
           before_sha=$(git -C "$SUB_PATH" rev-parse HEAD)
@@ -99,8 +123,7 @@ jobs:
           git add "$SUB_PATH"
           git commit -m "chore: bump $RELEASED_REPO to $RELEASED_TAG ($before_sha -> ${RELEASED_SHA:0:7})"
 
-          default_branch=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
-          git push origin "HEAD:$default_branch"
+          git push origin "HEAD:$target_branch"
 
           new_sha=$(git rev-parse HEAD)
           echo "new_sha=$new_sha" >> "$GITHUB_OUTPUT"
@@ -111,9 +134,9 @@ jobs:
     if: needs.bump-submodule.outputs.bumped == 'true'
     permissions:
       contents: write
-    uses: shau-08/CICD/.github/workflows/reusable-cd.yml@main
+    uses: shau-08/CICD/.github/workflows/Reusable-RTL-CD.yml@main
     with:
       build_output_path: generated_sv_dir
       ref: ${{ needs.bump-submodule.outputs.new_sha }}
-      commit_generated_output: true
+      tag_name: ${{ needs.bump-submodule.outputs.tag_name }}
     secrets: inherit
